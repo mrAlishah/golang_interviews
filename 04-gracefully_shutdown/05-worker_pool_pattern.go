@@ -29,7 +29,7 @@ func main() {
 	wg := &sync.WaitGroup{}
 
 	// Start consumer with cancellation context passed
-	go consumer.startConsumer(ctx)
+	go consumer.startConsumer(ctx) // pass the cancellable context to the consumer function
 
 	// Start workers and Add [workerPoolSize] to WaitGroup
 	wg.Add(workerPoolSize)
@@ -41,19 +41,22 @@ func main() {
 	termChan := make(chan os.Signal)
 	signal.Notify(termChan, syscall.SIGINT, syscall.SIGTERM)
 
-	<-termChan // Blocks here until interrupted
+	<-termChan // Blocks here until either SIGINT or SIGTERM is received.
 
 	// Handle shutdown
 	fmt.Println("*********************************\nShutdown signal received\n*********************************")
+	// call the cancelfunc to notify the consumer it's time to shut stuff down.
 	cancelFunc() // Signal cancellation to context.Context
-	wg.Wait()    // Block here until are workers are done
+	// program will wait here until all worker goroutines have reported that they're done
+	wg.Wait() // Block here until are workers are done
 
 	fmt.Println("All workers done, shutting down!")
 }
 
 // -- Consumer below here!
 type Consumer struct {
-	ingestChan chan int
+	//We need to tell the consumer goroutine that passes events from the intermediateChan to the jobsChan to close the jobsChan across goroutine boundaries.
+	ingestChan chan int //intermediateChan
 	jobsChan   chan int
 }
 
@@ -62,12 +65,13 @@ func (c Consumer) callbackFunc(event int) {
 	c.ingestChan <- event
 }
 
+// the cleanest way to let a worker “finish” is to close that “jobsChan” channel.
 // workerFunc starts a single worker function that will range on the jobsChan until that channel closes.
 func (c Consumer) workerFunc(wg *sync.WaitGroup, index int) {
 	defer wg.Done()
 
 	fmt.Printf("Worker %d starting\n", index)
-	for eventIndex := range c.jobsChan {
+	for eventIndex := range c.jobsChan { // <- on the close(jobsChan), all goroutines waiting for jobs here will exit the for-loop
 		// simulate work  taking between 1-3 seconds
 		fmt.Printf("Worker %d started job %d\n", index, eventIndex)
 		time.Sleep(time.Millisecond * time.Duration(1000+rand.Intn(2000)))
@@ -91,6 +95,10 @@ func (c Consumer) startConsumer(ctx context.Context) {
 	}
 }
 
+/*
+We get to register a callback function which is invoked each time the library has a new event for us.
+The library blocks until the callback function has finished executing and then invokes it again if there’s more events.
+*/
 // -- Producer simulates an external library that invokes the
 // registered callback when it has new data for us once per 100ms.
 type Producer struct {
